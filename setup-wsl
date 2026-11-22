@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# Laravel WSL Development Environment Setup
+# Target: Ubuntu on WSL 2 (22.04 / 24.04)
+# Installs: PHP 8.3, PHP-FPM, Composer, Nginx, MariaDB, Node.js (NVM),
+#           Git and common Laravel development utilities.
+#
+# Usage:
+#   chmod +x setup-laravel-wsl.sh
+#   ./setup-laravel-wsl.sh
+#
+# Optional environment overrides:
+#   PHP_VERSION=8.3 NODE_VERSION=24 ./setup-laravel-wsl.sh
+#
+set -Eeuo pipefail
+
+PHP_VERSION="${PHP_VERSION:-8.3}"
+NODE_VERSION="${NODE_VERSION:-24}"
+NVM_VERSION="${NVM_VERSION:-v0.40.3}"
+INSTALL_REDIS="${INSTALL_REDIS:-false}"
+INSTALL_SQLITE="${INSTALL_SQLITE:-true}"
+
+log()  { printf '\n\033[1;32m[INFO]\033[0m %s\n' "$*"; }
+warn() { printf '\n\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\n\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+
+trap 'die "Setup gagal pada baris ${LINENO}. Periksa pesan error di atas."' ERR
+
+[[ "${EUID}" -ne 0 ]] || die "Jalankan sebagai user biasa, bukan root. Script akan meminta sudo saat diperlukan."
+
+command -v apt-get >/dev/null 2>&1 || die "Script ini hanya mendukung Ubuntu/Debian berbasis APT."
+grep -qi microsoft /proc/version 2>/dev/null || warn "WSL tidak terdeteksi. Script tetap akan mencoba berjalan di Ubuntu."
+
+. /etc/os-release
+[[ "${ID:-}" == "ubuntu" ]] || die "OS terdeteksi: ${PRETTY_NAME:-unknown}. Script ini ditujukan untuk Ubuntu WSL."
+
+if [[ "${VERSION_ID:-}" != "22.04" && "${VERSION_ID:-}" != "24.04" ]]; then
+  warn "Versi Ubuntu ${VERSION_ID:-unknown} belum diuji. Lanjutkan dengan risiko sendiri."
+fi
+
+SUDO=""
+if [[ "$(id -u)" -ne 0 ]]; then
+  command -v sudo >/dev/null 2>&1 || die "sudo tidak ditemukan."
+  SUDO="sudo"
+fi
+
+run_root() { ${SUDO} "$@"; }
+
+log "Memperbarui package index dan memasang kebutuhan dasar..."
+run_root apt-get update
+run_root DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  ca-certificates curl wget gnupg lsb-release software-properties-common \
+  apt-transport-https unzip zip git build-essential pkg-config \
+  openssl rsync dos2unix
+
+# Ubuntu 24.04 menyediakan PHP 8.3 secara default. Ubuntu 22.04
+# memerlukan PPA Ondrej untuk PHP 8.3.
+if [[ "${VERSION_ID:-}" == "22.04" ]]; then
+  log "Menambahkan PPA PHP untuk menyediakan PHP ${PHP_VERSION}..."
+  run_root add-apt-repository -y ppa:ondrej/php
+  run_root apt-get update
+fi
+
+log "Memasang PHP ${PHP_VERSION}, PHP-FPM, dan ekstensi Laravel..."
+PHP_PACKAGES=(
+  "php${PHP_VERSION}" "php${PHP_VERSION}-cli" "php${PHP_VERSION}-fpm"
+  "php${PHP_VERSION}-common" "php${PHP_VERSION}-curl"
+  "php${PHP_VERSION}-mbstring" "php${PHP_VERSION}-xml"
+  "php${PHP_VERSION}-zip" "php${PHP_VERSION}-bcmath"
+  "php${PHP_VERSION}-intl" "php${PHP_VERSION}-mysql"
+  "php${PHP_VERSION}-gd" "php${PHP_VERSION}-readline"
+  "php${PHP_VERSION}-opcache"
+)
+if [[ "${INSTALL_SQLITE}" == "true" ]]; then
+  PHP_PACKAGES+=("php${PHP_VERSION}-sqlite3")
+fi
+run_root apt-get install -y "${PHP_PACKAGES[@]}"
+
+log "Memasang Composer..."
+run_root apt-get install -y composer
+
+log "Memasang Nginx dan MariaDB..."
+run_root apt-get install -y nginx mariadb-server mariadb-client
+
+if [[ "${INSTALL_REDIS}" == "true" ]]; then
+  log "Memasang Redis server dan ekstensi PHP Redis..."
+  run_root apt-get install -y redis-server "php${PHP_VERSION}-redis"
+fi
+
+log "Memasang utilitas tambahan..."
+run_root apt-get install -y \
+  acl cron supervisor net-tools dnsutils jq tree htop
+
+# Configure PHP for local development.
+PHP_INI="/etc/php/${PHP_VERSION}/fpm/php.ini"
+CLI_INI="/etc/php/${PHP_VERSION}/cli/php.ini"
